@@ -18,10 +18,10 @@ on:
         required: true
         type: string
       reports_path:
-        description: 'Path to .pbir files (relative to repo root)'
+        description: 'Path to search for .Report and .SemanticModel folders (relative to repo root)'
         required: false
         type: string
-        default: 'reports'
+        default: '.'
     secrets:
       AZURE_CLIENT_ID:
         required: true
@@ -33,9 +33,12 @@ on:
       deployment_status:
         description: 'Status of the deployment'
         value: ${{ jobs.deploy.outputs.status }}
-      deployed_files:
-        description: 'List of deployed files'
-        value: ${{ jobs.deploy.outputs.deployed_files }}
+      deployed_reports:
+        description: 'List of deployed reports'
+        value: ${{ jobs.deploy.outputs.deployed_reports }}
+      deployed_datasets:
+        description: 'List of deployed semantic models'
+        value: ${{ jobs.deploy.outputs.deployed_datasets }}
 
 env:
   FABRIC_API_BASE_URL: 'https://api.fabric.microsoft.com/v1'
@@ -46,7 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.deployment.outputs.status }}
-      deployed_files: ${{ steps.deployment.outputs.deployed_files }}
+      deployed_reports: ${{ steps.deployment.outputs.deployed_reports }}
+      deployed_datasets: ${{ steps.deployment.outputs.deployed_datasets }}
     
     steps:
       - name: Checkout Repository
@@ -106,118 +110,303 @@ jobs:
           echo "Workspace validated: $WORKSPACE_NAME"
           echo "workspace_name=$WORKSPACE_NAME" >> $GITHUB_OUTPUT
       
-      - name: Find Power BI Files
+      - name: Find Power BI Items
         id: find-files
         run: |
-          echo "Searching for .pbir files in ${{ inputs.reports_path }}..."
+          echo "Searching for Power BI items in ${{ inputs.reports_path }}..."
           
           if [ ! -d "${{ inputs.reports_path }}" ]; then
-            echo "Error: Reports path '${{ inputs.reports_path }}' does not exist"
+            echo "Error: Search path '${{ inputs.reports_path }}' does not exist"
             exit 1
           fi
           
-          # Find all .pbir files
-          FILES=$(find "${{ inputs.reports_path }}" -type f -name "*.pbir" | sort)
-          FILE_COUNT=$(echo "$FILES" | grep -c . || echo "0")
+          # Find all .Report folders
+          echo "=== Searching for Reports ==="
+          REPORT_FOLDERS=$(find "${{ inputs.reports_path }}" -type d -name "*.Report" | sort)
+          REPORT_COUNT=$(echo "$REPORT_FOLDERS" | grep -c . || echo "0")
           
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "No .pbir files found in ${{ inputs.reports_path }}"
+          echo "Found $REPORT_COUNT .Report folder(s)"
+          
+          VALID_REPORTS=0
+          > /tmp/reports_to_deploy.txt
+          
+          if [ "$REPORT_COUNT" -gt 0 ]; then
+            while IFS= read -r FOLDER; do
+              [ -z "$FOLDER" ] && continue
+              PBIR_FILE="$FOLDER/definition.pbir"
+              
+              if [ -f "$PBIR_FILE" ]; then
+                echo "  ✓ $FOLDER"
+                echo "$FOLDER" >> /tmp/reports_to_deploy.txt
+                VALID_REPORTS=$((VALID_REPORTS + 1))
+              else
+                echo "  ✗ $FOLDER (missing definition.pbir)"
+              fi
+            done <<< "$REPORT_FOLDERS"
+          fi
+          
+          # Find all .SemanticModel folders
+          echo ""
+          echo "=== Searching for Semantic Models ==="
+          DATASET_FOLDERS=$(find "${{ inputs.reports_path }}" -type d -name "*.SemanticModel" | sort)
+          DATASET_COUNT=$(echo "$DATASET_FOLDERS" | grep -c . || echo "0")
+          
+          echo "Found $DATASET_COUNT .SemanticModel folder(s)"
+          
+          VALID_DATASETS=0
+          > /tmp/datasets_to_deploy.txt
+          
+          if [ "$DATASET_COUNT" -gt 0 ]; then
+            while IFS= read -r FOLDER; do
+              [ -z "$FOLDER" ] && continue
+              PBISM_FILE="$FOLDER/definition.pbism"
+              
+              if [ -f "$PBISM_FILE" ]; then
+                echo "  ✓ $FOLDER"
+                echo "$FOLDER" >> /tmp/datasets_to_deploy.txt
+                VALID_DATASETS=$((VALID_DATASETS + 1))
+              else
+                echo "  ✗ $FOLDER (missing definition.pbism)"
+              fi
+            done <<< "$DATASET_FOLDERS"
+          fi
+          
+          echo ""
+          echo "=== Summary ==="
+          echo "Valid reports to deploy: $VALID_REPORTS"
+          echo "Valid semantic models to deploy: $VALID_DATASETS"
+          
+          TOTAL_ITEMS=$((VALID_REPORTS + VALID_DATASETS))
+          
+          if [ "$TOTAL_ITEMS" -eq 0 ]; then
+            echo "No valid Power BI items found"
             exit 1
           fi
           
-          echo "Found $FILE_COUNT .pbir file(s):"
-          echo "$FILES"
-          
-          # Save file list for next step
-          echo "$FILES" > /tmp/files_to_deploy.txt
-          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          echo "report_count=$VALID_REPORTS" >> $GITHUB_OUTPUT
+          echo "dataset_count=$VALID_DATASETS" >> $GITHUB_OUTPUT
+          echo "total_count=$TOTAL_ITEMS" >> $GITHUB_OUTPUT
       
-      - name: Deploy Files to Workspace
-        id: deployment
+      - name: Deploy Semantic Models to Workspace
+        id: deploy-datasets
         run: |
-          echo "Starting file deployment to ${{ inputs.environment }} workspace..."
+          echo "=========================================="
+          echo "DEPLOYING SEMANTIC MODELS"
+          echo "=========================================="
+          
           WORKSPACE_ID="${{ inputs.workspace_id }}"
-          DEPLOYED_FILES=""
+          DEPLOYED_DATASETS=""
           SUCCESS_COUNT=0
           FAILED_COUNT=0
           
-          # Read files list
-          while IFS= read -r FILE_PATH; do
-            [ -z "$FILE_PATH" ] && continue
+          if [ ! -f /tmp/datasets_to_deploy.txt ] || [ ! -s /tmp/datasets_to_deploy.txt ]; then
+            echo "No semantic models to deploy"
+            echo "deployed_datasets=" >> $GITHUB_OUTPUT
+            echo "dataset_success=0" >> $GITHUB_OUTPUT
+            echo "dataset_failed=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Deploy each semantic model
+          while IFS= read -r DATASET_FOLDER; do
+            [ -z "$DATASET_FOLDER" ] && continue
             
-            FILE_NAME=$(basename "$FILE_PATH")
-            REPORT_NAME="${FILE_NAME%.pbir}"
+            DATASET_NAME=$(basename "$DATASET_FOLDER" .SemanticModel)
             
             echo ""
             echo "================================================"
-            echo "Deploying: $FILE_NAME"
-            echo "Report Name: $REPORT_NAME"
+            echo "Deploying Semantic Model: $DATASET_NAME"
+            echo "Folder: $DATASET_FOLDER"
             echo "================================================"
             
-            # Read file content and encode to base64
-            FILE_CONTENT=$(cat "$FILE_PATH" | base64 -w 0)
+            # Build definition payload from all files in definition folder
+            PAYLOAD_PARTS="["
+            FIRST_FILE=true
             
-            # Create or update report in workspace
-            UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-              "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/reports" \
+            # Process all files in the definition folder
+            if [ -d "$DATASET_FOLDER/definition" ]; then
+              while IFS= read -r FILE; do
+                [ -z "$FILE" ] && continue
+                
+                RELATIVE_PATH="${FILE#$DATASET_FOLDER/definition/}"
+                FILE_CONTENT=$(base64 -w 0 < "$FILE")
+                
+                if [ "$FIRST_FILE" = false ]; then
+                  PAYLOAD_PARTS="$PAYLOAD_PARTS,"
+                fi
+                FIRST_FILE=false
+                
+                PAYLOAD_PARTS="$PAYLOAD_PARTS{\"path\":\"$RELATIVE_PATH\",\"payload\":\"$FILE_CONTENT\",\"payloadType\":\"InlineBase64\"}"
+                
+              done < <(find "$DATASET_FOLDER/definition" -type f)
+            fi
+            
+            PAYLOAD_PARTS="$PAYLOAD_PARTS]"
+            
+            # Create semantic model in workspace
+            RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+              "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/semanticModels" \
               -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
               -H "Content-Type: application/json" \
-              -d "{
-                \"displayName\": \"$REPORT_NAME\",
-                \"definition\": {
-                  \"parts\": [
-                    {
-                      \"path\": \"report.json\",
-                      \"payload\": \"$FILE_CONTENT\",
-                      \"payloadType\": \"InlineBase64\"
-                    }
-                  ]
-                }
-              }")
+              -d "{\"displayName\":\"$DATASET_NAME\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")
             
-            HTTP_STATUS=$(echo "$UPLOAD_RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
-            BODY=$(echo "$UPLOAD_RESPONSE" | sed '/HTTP_STATUS/d')
+            HTTP_STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
+            BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
             
             if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 201 ] || [ "$HTTP_STATUS" -eq 202 ]; then
-              echo "✓ Successfully deployed: $FILE_NAME"
-              REPORT_ID=$(echo "$BODY" | jq -r '.id // "unknown"')
-              echo "  Report ID: $REPORT_ID"
+              DATASET_ID=$(echo "$BODY" | jq -r '.id // "unknown"')
+              echo "✓ Successfully deployed: $DATASET_NAME"
+              echo "  Semantic Model ID: $DATASET_ID"
               SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-              DEPLOYED_FILES="$DEPLOYED_FILES$FILE_NAME, "
+              DEPLOYED_DATASETS="$DEPLOYED_DATASETS$DATASET_NAME, "
             else
-              echo "✗ Failed to deploy: $FILE_NAME"
+              echo "✗ Failed to deploy: $DATASET_NAME"
               echo "  Status: $HTTP_STATUS"
               echo "  Response: $BODY"
               FAILED_COUNT=$((FAILED_COUNT + 1))
             fi
             
-          done < /tmp/files_to_deploy.txt
+          done < /tmp/datasets_to_deploy.txt
           
-          # Remove trailing comma and space
-          DEPLOYED_FILES=${DEPLOYED_FILES%, }
+          DEPLOYED_DATASETS=${DEPLOYED_DATASETS%, }
           
           echo ""
-          echo "================================================"
-          echo "Deployment Summary"
-          echo "================================================"
-          echo "Total files: ${{ steps.find-files.outputs.file_count }}"
-          echo "Successfully deployed: $SUCCESS_COUNT"
+          echo "=== Semantic Models Deployment Summary ==="
+          echo "Total: ${{ steps.find-files.outputs.dataset_count }}"
+          echo "Success: $SUCCESS_COUNT"
           echo "Failed: $FAILED_COUNT"
-          echo "================================================"
+          echo "=========================================="
           
-          # Set outputs
-          echo "deployed_files=$DEPLOYED_FILES" >> $GITHUB_OUTPUT
+          echo "deployed_datasets=$DEPLOYED_DATASETS" >> $GITHUB_OUTPUT
+          echo "dataset_success=$SUCCESS_COUNT" >> $GITHUB_OUTPUT
+          echo "dataset_failed=$FAILED_COUNT" >> $GITHUB_OUTPUT
+      
+      - name: Deploy Reports to Workspace
+        id: deploy-reports
+        run: |
+          echo "=========================================="
+          echo "DEPLOYING REPORTS"
+          echo "=========================================="
           
-          if [ $FAILED_COUNT -eq 0 ]; then
+          WORKSPACE_ID="${{ inputs.workspace_id }}"
+          DEPLOYED_REPORTS=""
+          SUCCESS_COUNT=0
+          FAILED_COUNT=0
+          
+          if [ ! -f /tmp/reports_to_deploy.txt ] || [ ! -s /tmp/reports_to_deploy.txt ]; then
+            echo "No reports to deploy"
+            echo "deployed_reports=" >> $GITHUB_OUTPUT
+            echo "report_success=0" >> $GITHUB_OUTPUT
+            echo "report_failed=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Deploy each report
+          while IFS= read -r REPORT_FOLDER; do
+            [ -z "$REPORT_FOLDER" ] && continue
+            
+            REPORT_NAME=$(basename "$REPORT_FOLDER" .Report)
+            
+            echo ""
+            echo "================================================"
+            echo "Deploying Report: $REPORT_NAME"
+            echo "Folder: $REPORT_FOLDER"
+            echo "================================================"
+            
+            # Build definition payload from all files in definition folder
+            PAYLOAD_PARTS="["
+            FIRST_FILE=true
+            
+            # Process all files in the definition folder
+            if [ -d "$REPORT_FOLDER/definition" ]; then
+              while IFS= read -r FILE; do
+                [ -z "$FILE" ] && continue
+                
+                RELATIVE_PATH="${FILE#$REPORT_FOLDER/definition/}"
+                FILE_CONTENT=$(base64 -w 0 < "$FILE")
+                
+                if [ "$FIRST_FILE" = false ]; then
+                  PAYLOAD_PARTS="$PAYLOAD_PARTS,"
+                fi
+                FIRST_FILE=false
+                
+                PAYLOAD_PARTS="$PAYLOAD_PARTS{\"path\":\"$RELATIVE_PATH\",\"payload\":\"$FILE_CONTENT\",\"payloadType\":\"InlineBase64\"}"
+                
+              done < <(find "$REPORT_FOLDER/definition" -type f)
+            fi
+            
+            PAYLOAD_PARTS="$PAYLOAD_PARTS]"
+            
+            # Create report in workspace
+            RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+              "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/reports" \
+              -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d "{\"displayName\":\"$REPORT_NAME\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")
+            
+            HTTP_STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
+            BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
+            
+            if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 201 ] || [ "$HTTP_STATUS" -eq 202 ]; then
+              REPORT_ID=$(echo "$BODY" | jq -r '.id // "unknown"')
+              echo "✓ Successfully deployed: $REPORT_NAME"
+              echo "  Report ID: $REPORT_ID"
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+              DEPLOYED_REPORTS="$DEPLOYED_REPORTS$REPORT_NAME, "
+            else
+              echo "✗ Failed to deploy: $REPORT_NAME"
+              echo "  Status: $HTTP_STATUS"
+              echo "  Response: $BODY"
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+            
+          done < /tmp/reports_to_deploy.txt
+          
+          DEPLOYED_REPORTS=${DEPLOYED_REPORTS%, }
+          
+          echo ""
+          echo "=== Reports Deployment Summary ==="
+          echo "Total: ${{ steps.find-files.outputs.report_count }}"
+          echo "Success: $SUCCESS_COUNT"
+          echo "Failed: $FAILED_COUNT"
+          echo "=========================================="
+          
+          echo "deployed_reports=$DEPLOYED_REPORTS" >> $GITHUB_OUTPUT
+          echo "report_success=$SUCCESS_COUNT" >> $GITHUB_OUTPUT
+          echo "report_failed=$FAILED_COUNT" >> $GITHUB_OUTPUT
+      
+      - name: Final Deployment Status
+        id: deployment
+        run: |
+          DATASET_SUCCESS=${{ steps.deploy-datasets.outputs.dataset_success || 0 }}
+          DATASET_FAILED=${{ steps.deploy-datasets.outputs.dataset_failed || 0 }}
+          REPORT_SUCCESS=${{ steps.deploy-reports.outputs.report_success || 0 }}
+          REPORT_FAILED=${{ steps.deploy-reports.outputs.report_failed || 0 }}
+          
+          TOTAL_SUCCESS=$((DATASET_SUCCESS + REPORT_SUCCESS))
+          TOTAL_FAILED=$((DATASET_FAILED + REPORT_FAILED))
+          TOTAL_ITEMS=${{ steps.find-files.outputs.total_count }}
+          
+          echo ""
+          echo "=========================================="
+          echo "OVERALL DEPLOYMENT SUMMARY"
+          echo "=========================================="
+          echo "Semantic Models: $DATASET_SUCCESS deployed, $DATASET_FAILED failed"
+          echo "Reports: $REPORT_SUCCESS deployed, $REPORT_FAILED failed"
+          echo "----------------------------------------"
+          echo "Total: $TOTAL_SUCCESS/$TOTAL_ITEMS succeeded"
+          echo "=========================================="
+          
+          if [ $TOTAL_FAILED -eq 0 ]; then
             echo "status=success" >> $GITHUB_OUTPUT
-            echo "All files deployed successfully!"
-          elif [ $SUCCESS_COUNT -gt 0 ]; then
+            echo "✅ All items deployed successfully!"
+          elif [ $TOTAL_SUCCESS -gt 0 ]; then
             echo "status=partial" >> $GITHUB_OUTPUT
-            echo "Some files failed to deploy"
+            echo "⚠️ Some items failed to deploy"
             exit 1
           else
             echo "status=failed" >> $GITHUB_OUTPUT
-            echo "All deployments failed"
+            echo "❌ All deployments failed"
             exit 1
           fi
       
@@ -232,20 +421,33 @@ jobs:
           echo "| **Workspace** | ${{ steps.validate.outputs.workspace_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Workspace ID** | \`${{ inputs.workspace_id }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Branch** | \`${{ inputs.branch }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Files Found** | ${{ steps.find-files.outputs.file_count || '0' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Status** | ${{ steps.deployment.outputs.status || 'failed' }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ -n "${{ steps.deployment.outputs.deployed_files }}" ]; then
-            echo "### Deployed Files" >> $GITHUB_STEP_SUMMARY
-            echo "${{ steps.deployment.outputs.deployed_files }}" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Semantic Models" >> $GITHUB_STEP_SUMMARY
+          echo "- **Found:** ${{ steps.find-files.outputs.dataset_count || '0' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed:** ${{ steps.deploy-datasets.outputs.dataset_success || '0' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failed:** ${{ steps.deploy-datasets.outputs.dataset_failed || '0' }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${{ steps.deploy-datasets.outputs.deployed_datasets }}" ]; then
+            echo "- **Items:** ${{ steps.deploy-datasets.outputs.deployed_datasets }}" >> $GITHUB_STEP_SUMMARY
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Reports" >> $GITHUB_STEP_SUMMARY
+          echo "- **Found:** ${{ steps.find-files.outputs.report_count || '0' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed:** ${{ steps.deploy-reports.outputs.report_success || '0' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failed:** ${{ steps.deploy-reports.outputs.report_failed || '0' }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${{ steps.deploy-reports.outputs.deployed_reports }}" ]; then
+            echo "- **Items:** ${{ steps.deploy-reports.outputs.deployed_reports }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ steps.deployment.outputs.status }}" = "success" ]; then
-            echo "**All files deployed successfully**" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **All items deployed successfully**" >> $GITHUB_STEP_SUMMARY
           elif [ "${{ steps.deployment.outputs.status }}" = "partial" ]; then
-            echo "**Some files failed to deploy**" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **Some items failed to deploy**" >> $GITHUB_STEP_SUMMARY
           else
-            echo "**Deployment failed**" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Deployment failed**" >> $GITHUB_STEP_SUMMARY
           fi

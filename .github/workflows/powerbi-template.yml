@@ -229,87 +229,63 @@ jobs:
             exit 0
           fi
           
-          # Deploy each semantic model
           while IFS= read -r DATASET_FOLDER; do
             [ -z "$DATASET_FOLDER" ] && continue
             
             DATASET_NAME=$(basename "$DATASET_FOLDER" .SemanticModel)
-            
             echo ""
             echo "================================================"
             echo "📊 Deploying Semantic Model: $DATASET_NAME"
             echo "   Folder: $DATASET_FOLDER"
             echo "================================================"
             
-            # Determine the definition folder location
-            DEFINITION_FOLDER=""
-            if [ -d "$DATASET_FOLDER/definition" ] && [ "$(find "$DATASET_FOLDER/definition" -type f | wc -l)" -gt 0 ]; then
-              DEFINITION_FOLDER="$DATASET_FOLDER/definition"
-            else
-              echo "⚠️  Warning: No definition folder found or it's empty"
-              echo "   Looking for files in root folder instead"
+            # Determine definition folder
+            DEFINITION_FOLDER="$DATASET_FOLDER/definition"
+            if [ ! -d "$DEFINITION_FOLDER" ] || [ "$(find "$DEFINITION_FOLDER" -type f | wc -l)" -eq 0 ]; then
+              echo "⚠️  Warning: definition folder missing or empty, using root folder"
               DEFINITION_FOLDER="$DATASET_FOLDER"
             fi
-            
             echo "   Using definition folder: $DEFINITION_FOLDER"
             
-            # Build definition payload from all files in definition folder
+            # Build payload
             PAYLOAD_PARTS="["
             FIRST_FILE=true
             FILE_COUNT=0
-            
-            # Process all files in the definition folder (excluding .platform and other metadata)
             while IFS= read -r FILE; do
               [ -z "$FILE" ] && continue
-              
-              # Skip .platform and other non-definition files
               BASENAME=$(basename "$FILE")
               if [[ "$BASENAME" == ".platform" ]] || [[ "$BASENAME" == ".pbi"* ]]; then
                 continue
               fi
               
-              # Calculate relative path - MUST include 'definition/' prefix for Fabric API
-              if [ "$DEFINITION_FOLDER" = "$DATASET_FOLDER/definition" ]; then
-                # Files are in definition subfolder, prepend 'definition/' to path
-                RELATIVE_PATH="definition/${FILE#$DATASET_FOLDER/definition/}"
-              else
-                # Files are in root folder, use as-is
-                RELATIVE_PATH="${FILE#$DATASET_FOLDER/}"
-              fi
-              
-              # Read and encode file content
+              RELATIVE_PATH="definition/${FILE#$DATASET_FOLDER/}"
               FILE_CONTENT=$(base64 -w 0 < "$FILE")
               
               if [ "$FIRST_FILE" = false ]; then
                 PAYLOAD_PARTS="$PAYLOAD_PARTS,"
               fi
               FIRST_FILE=false
-              
               PAYLOAD_PARTS="$PAYLOAD_PARTS{\"path\":\"$RELATIVE_PATH\",\"payload\":\"$FILE_CONTENT\",\"payloadType\":\"InlineBase64\"}"
               FILE_COUNT=$((FILE_COUNT + 1))
-              
               echo "   📄 Added file: $RELATIVE_PATH"
-              
             done < <(find "$DEFINITION_FOLDER" -type f | sort)
-            
             PAYLOAD_PARTS="$PAYLOAD_PARTS]"
             
             echo "   Total files to upload: $FILE_COUNT"
             echo ""
             echo "   🚀 Creating semantic model in workspace..."
             
-            # Create semantic model in workspace
             RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-              "${{ env.FABRIC_API_BASE_URL }}/workspaces/C5FAF867-77B6-499A-A8CD-C00C3C046218/items" \
+              "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/items" \
               -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
               -H "Content-Type: application/json" \
               -d "{\"displayName\":\"$DATASET_NAME\",\"type\":\"SemanticModel\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")
             
             HTTP_STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
             BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
+            DATASET_ID=$(echo "$BODY" | jq -r '.id // empty')
             
-            if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 201 ] || [ "$HTTP_STATUS" -eq 202 ]; then
-              DATASET_ID=$(echo "$BODY" | jq -r '.id // "unknown"')
+            if [[ "$HTTP_STATUS" -eq 200 || "$HTTP_STATUS" -eq 201 || "$HTTP_STATUS" -eq 202 ]] && [[ -n "$DATASET_ID" ]] && [[ "$DATASET_ID" != "unknown" ]]; then
               echo "   ✅ Successfully deployed: $DATASET_NAME"
               echo "   📋 Semantic Model ID: $DATASET_ID"
               SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
@@ -324,7 +300,6 @@ jobs:
           done < /tmp/datasets_to_deploy.txt
           
           DEPLOYED_DATASETS=${DEPLOYED_DATASETS%, }
-          
           echo ""
           echo "=========================================="
           echo "SEMANTIC MODELS DEPLOYMENT SUMMARY"
@@ -359,87 +334,61 @@ jobs:
             exit 0
           fi
           
-          # Deploy each report
           while IFS= read -r REPORT_FOLDER; do
             [ -z "$REPORT_FOLDER" ] && continue
             
             REPORT_NAME=$(basename "$REPORT_FOLDER" .Report)
-            
             echo ""
             echo "================================================"
             echo "📊 Deploying Report: $REPORT_NAME"
             echo "   Folder: $REPORT_FOLDER"
             echo "================================================"
             
-            # Determine the definition folder location
-            DEFINITION_FOLDER=""
-            if [ -d "$REPORT_FOLDER/definition" ] && [ "$(find "$REPORT_FOLDER/definition" -type f | wc -l)" -gt 0 ]; then
-              DEFINITION_FOLDER="$REPORT_FOLDER/definition"
-            else
-              echo "⚠️  Warning: No definition folder found or it's empty"
-              echo "   Looking for files in root folder instead"
+            DEFINITION_FOLDER="$REPORT_FOLDER/definition"
+            if [ ! -d "$DEFINITION_FOLDER" ] || [ "$(find "$DEFINITION_FOLDER" -type f | wc -l)" -eq 0 ]; then
+              echo "⚠️  Warning: definition folder missing or empty, using root folder"
               DEFINITION_FOLDER="$REPORT_FOLDER"
             fi
-            
             echo "   Using definition folder: $DEFINITION_FOLDER"
             
-            # Build definition payload from all files in definition folder
             PAYLOAD_PARTS="["
             FIRST_FILE=true
             FILE_COUNT=0
-            
-            # Process all files in the definition folder (excluding .platform and other metadata)
             while IFS= read -r FILE; do
               [ -z "$FILE" ] && continue
-              
-              # Skip .platform and other non-definition files
               BASENAME=$(basename "$FILE")
               if [[ "$BASENAME" == ".platform" ]] || [[ "$BASENAME" == ".pbi"* ]]; then
                 continue
               fi
               
-              # Calculate relative path - MUST include 'definition/' prefix for Fabric API
-              if [ "$DEFINITION_FOLDER" = "$REPORT_FOLDER/definition" ]; then
-                # Files are in definition subfolder, prepend 'definition/' to path
-                RELATIVE_PATH="definition/${FILE#$REPORT_FOLDER/definition/}"
-              else
-                # Files are in root folder, use as-is
-                RELATIVE_PATH="${FILE#$REPORT_FOLDER/}"
-              fi
-              
-              # Read and encode file content
+              RELATIVE_PATH="definition/${FILE#$REPORT_FOLDER/}"
               FILE_CONTENT=$(base64 -w 0 < "$FILE")
               
               if [ "$FIRST_FILE" = false ]; then
                 PAYLOAD_PARTS="$PAYLOAD_PARTS,"
               fi
               FIRST_FILE=false
-              
               PAYLOAD_PARTS="$PAYLOAD_PARTS{\"path\":\"$RELATIVE_PATH\",\"payload\":\"$FILE_CONTENT\",\"payloadType\":\"InlineBase64\"}"
               FILE_COUNT=$((FILE_COUNT + 1))
-              
               echo "   📄 Added file: $RELATIVE_PATH"
-              
             done < <(find "$DEFINITION_FOLDER" -type f | sort)
-            
             PAYLOAD_PARTS="$PAYLOAD_PARTS]"
             
             echo "   Total files to upload: $FILE_COUNT"
             echo ""
             echo "   🚀 Creating report in workspace..."
             
-            # Create report in workspace
             RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-              "${{ env.FABRIC_API_BASE_URL }}/workspaces/C5FAF867-77B6-499A-A8CD-C00C3C046218/items" \
+              "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/items" \
               -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
               -H "Content-Type: application/json" \
               -d "{\"displayName\":\"$REPORT_NAME\",\"type\":\"Report\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")
             
             HTTP_STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
             BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
+            REPORT_ID=$(echo "$BODY" | jq -r '.id // empty')
             
-            if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 201 ] || [ "$HTTP_STATUS" -eq 202 ]; then
-              REPORT_ID=$(echo "$BODY" | jq -r '.id // "unknown"')
+            if [[ "$HTTP_STATUS" -eq 200 || "$HTTP_STATUS" -eq 201 || "$HTTP_STATUS" -eq 202 ]] && [[ -n "$REPORT_ID" ]] && [[ "$REPORT_ID" != "unknown" ]]; then
               echo "   ✅ Successfully deployed: $REPORT_NAME"
               echo "   📋 Report ID: $REPORT_ID"
               SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
@@ -454,7 +403,6 @@ jobs:
           done < /tmp/reports_to_deploy.txt
           
           DEPLOYED_REPORTS=${DEPLOYED_REPORTS%, }
-          
           echo ""
           echo "=========================================="
           echo "REPORTS DEPLOYMENT SUMMARY"

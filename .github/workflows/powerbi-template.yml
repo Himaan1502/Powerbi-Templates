@@ -303,7 +303,7 @@ jobs:
               "${{ env.FABRIC_API_BASE_URL }}/workspaces/C5FAF867-77B6-499A-A8CD-C00C3C046218/items" \
               -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
               -H "Content-Type: application/json" \
-              -d "{\"displayName\":\"$DATASET_NAME\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")
+              -d "{\"displayName\":\"$DATASET_NAME\",\"type\":\"SemanticModel\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")
             
             HTTP_STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
             BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
@@ -433,7 +433,7 @@ jobs:
               "${{ env.FABRIC_API_BASE_URL }}/workspaces/C5FAF867-77B6-499A-A8CD-C00C3C046218/items" \
               -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
               -H "Content-Type: application/json" \
-              -d "{\"displayName\":\"$REPORT_NAME\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")
+              -d "{\"displayName\":\"$REPORT_NAME\",\"type\":\"Report\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")
             
             HTTP_STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
             BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')

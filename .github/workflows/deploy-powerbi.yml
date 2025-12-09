@@ -113,67 +113,67 @@ jobs:
           echo "Workspace validated: $WORKSPACE_NAME"
           echo "workspace_name=$WORKSPACE_NAME" >> $GITHUB_OUTPUT
       
-      # - name: Check Git Status
-      #   id: git-status
-      #   run: |
-      #     echo "Checking Git synchronization status..."
-      #     WORKSPACE_ID="${{ inputs.workspace_id }}"
+      - name: Check Git Status
+        id: git-status
+        run: |
+          echo "Checking Git synchronization status..."
+          WORKSPACE_ID="${{ inputs.workspace_id }}"
           
-      #     STATUS_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X GET \
-      #       "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/git/status" \
-      #       -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}")
+          STATUS_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X GET \
+            "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/git/status" \
+            -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}")
           
-      #     HTTP_STATUS=$(echo "$STATUS_RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
-      #     BODY=$(echo "$STATUS_RESPONSE" | sed '/HTTP_STATUS/d')
+          HTTP_STATUS=$(echo "$STATUS_RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
+          BODY=$(echo "$STATUS_RESPONSE" | sed '/HTTP_STATUS/d')
           
-      #     if [ "$HTTP_STATUS" -ne 200 ]; then
-      #       echo "Failed to get Git status"
-      #       echo "Status: $HTTP_STATUS"
-      #       exit 1
-      #     fi
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "Failed to get Git status"
+            echo "Status: $HTTP_STATUS"
+            exit 1
+          fi
           
-      #     echo "Git Status Response:"
-      #     echo "$BODY" | jq '.'
+          echo "Git Status Response:"
+          echo "$BODY" | jq '.'
           
-      #     # Check if there are incoming changes
-      #     REMOTE_COMMIT=$(echo "$BODY" | jq -r '.remoteCommitHash // empty')
-      #     WORKSPACE_HEAD=$(echo "$BODY" | jq -r '.workspaceHead // empty')
+          # Check if there are incoming changes
+          REMOTE_COMMIT=$(echo "$BODY" | jq -r '.remoteCommitHash // empty')
+          WORKSPACE_HEAD=$(echo "$BODY" | jq -r '.workspaceHead // empty')
           
-      #     if [ "$REMOTE_COMMIT" != "$WORKSPACE_HEAD" ]; then
-      #       echo "has_changes=true" >> $GITHUB_OUTPUT
-      #       echo "Incoming changes detected"
-      #     else
-      #       echo "has_changes=false" >> $GITHUB_OUTPUT
-      #       echo "No incoming changes - workspace is up to date"
-      #     fi
+          if [ "$REMOTE_COMMIT" != "$WORKSPACE_HEAD" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Incoming changes detected"
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No incoming changes - workspace is up to date"
+          fi
           
-      #     echo "remote_commit=$REMOTE_COMMIT" >> $GITHUB_OUTPUT
-      #     echo "workspace_head=$WORKSPACE_HEAD" >> $GITHUB_OUTPUT
+          echo "remote_commit=$REMOTE_COMMIT" >> $GITHUB_OUTPUT
+          echo "workspace_head=$WORKSPACE_HEAD" >> $GITHUB_OUTPUT
       
-      # - name: Create Backup (Optional)
-      #   if: inputs.enable_backup == true
-      #   run: |
-      #     echo "Creating backup of current workspace state..."
-      #     WORKSPACE_ID="${{ inputs.workspace_id }}"
+      - name: Create Backup (Optional)
+        if: inputs.enable_backup == true
+        run: |
+          echo "Creating backup of current workspace state..."
+          WORKSPACE_ID="${{ inputs.workspace_id }}"
           
-      #     COMMIT_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-      #       "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/git/commitToGit" \
-      #       -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
-      #       -H "Content-Type: application/json" \
-      #       -d "{
-      #         \"mode\": \"All\",
-      #         \"comment\": \"Backup before ${{ inputs.environment }} deployment - $(date -u '+%Y-%m-%d %H:%M:%S UTC')\"
-      #       }")
+          COMMIT_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+            "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/git/commitToGit" \
+            -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"mode\": \"All\",
+              \"comment\": \"Backup before ${{ inputs.environment }} deployment - $(date -u '+%Y-%m-%d %H:%M:%S UTC')\"
+            }")
           
-      #     HTTP_STATUS=$(echo "$COMMIT_RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
-      #     BODY=$(echo "$COMMIT_RESPONSE" | sed '/HTTP_STATUS/d')
+          HTTP_STATUS=$(echo "$COMMIT_RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
+          BODY=$(echo "$COMMIT_RESPONSE" | sed '/HTTP_STATUS/d')
           
-      #     if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 202 ]; then
-      #       echo "Backup commit created successfully"
-      #     else
-      #       echo "Backup commit failed (continuing anyway)"
-      #       echo "Status: $HTTP_STATUS"
-      #     fi
+          if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 202 ]; then
+            echo "Backup commit created successfully"
+          else
+            echo "Backup commit failed (continuing anyway)"
+            echo "Status: $HTTP_STATUS"
+          fi
       
       - name: Deploy to Workspace
         id: deployment

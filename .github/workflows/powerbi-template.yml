@@ -268,10 +268,12 @@ jobs:
                 continue
               fi
               
-              # Calculate relative path from the definition folder
+              # Calculate relative path - MUST include 'definition/' prefix for Fabric API
               if [ "$DEFINITION_FOLDER" = "$DATASET_FOLDER/definition" ]; then
-                RELATIVE_PATH="${FILE#$DATASET_FOLDER/definition/}"
+                # Files are in definition subfolder, prepend 'definition/' to path
+                RELATIVE_PATH="definition/${FILE#$DATASET_FOLDER/definition/}"
               else
+                # Files are in root folder, use as-is
                 RELATIVE_PATH="${FILE#$DATASET_FOLDER/}"
               fi
               
@@ -396,10 +398,12 @@ jobs:
                 continue
               fi
               
-              # Calculate relative path from the definition folder
+              # Calculate relative path - MUST include 'definition/' prefix for Fabric API
               if [ "$DEFINITION_FOLDER" = "$REPORT_FOLDER/definition" ]; then
-                RELATIVE_PATH="${FILE#$REPORT_FOLDER/definition/}"
+                # Files are in definition subfolder, prepend 'definition/' to path
+                RELATIVE_PATH="definition/${FILE#$REPORT_FOLDER/definition/}"
               else
+                # Files are in root folder, use as-is
                 RELATIVE_PATH="${FILE#$REPORT_FOLDER/}"
               fi
               

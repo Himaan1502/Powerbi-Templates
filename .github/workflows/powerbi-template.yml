@@ -300,7 +300,7 @@ jobs:
             
             # Create semantic model in workspace
             RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-              "${{ env.FABRIC_API_BASE_URL }}/workspaces/C5FAF867-77B6-499A-A8CD-C00C3C046218/semanticModels" \
+              "${{ env.FABRIC_API_BASE_URL }}/workspaces/C5FAF867-77B6-499A-A8CD-C00C3C046218/items" \
               -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
               -H "Content-Type: application/json" \
               -d "{\"displayName\":\"$DATASET_NAME\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")
@@ -430,7 +430,7 @@ jobs:
             
             # Create report in workspace
             RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-              "${{ env.FABRIC_API_BASE_URL }}/workspaces/C5FAF867-77B6-499A-A8CD-C00C3C046218/reports" \
+              "${{ env.FABRIC_API_BASE_URL }}/workspaces/C5FAF867-77B6-499A-A8CD-C00C3C046218/items" \
               -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
               -H "Content-Type: application/json" \
               -d "{\"displayName\":\"$REPORT_NAME\",\"definition\":{\"parts\":$PAYLOAD_PARTS}}")

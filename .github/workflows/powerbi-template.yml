@@ -1,0 +1,251 @@
+# .github/workflows/deploy-powerbi.yml
+# Reusable workflow for Power BI file deployment (Testing - File Upload Only)
+# Repository: your-org/Powerbi-Templates (Template Repository)
+name: Deploy Power BI Files to Workspace
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment (dev/uat/prod)'
+        required: true
+        type: string
+      branch:
+        description: 'Git branch to deploy from'
+        required: true
+        type: string
+      workspace_id:
+        description: 'Target workspace ID'
+        required: true
+        type: string
+      reports_path:
+        description: 'Path to .pbir files (relative to repo root)'
+        required: false
+        type: string
+        default: 'reports'
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_CLIENT_SECRET:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+    outputs:
+      deployment_status:
+        description: 'Status of the deployment'
+        value: ${{ jobs.deploy.outputs.status }}
+      deployed_files:
+        description: 'List of deployed files'
+        value: ${{ jobs.deploy.outputs.deployed_files }}
+
+env:
+  FABRIC_API_BASE_URL: 'https://api.fabric.microsoft.com/v1'
+
+jobs:
+  deploy:
+    name: Deploy Files to ${{ inputs.environment }} Workspace
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.deployment.outputs.status }}
+      deployed_files: ${{ steps.deployment.outputs.deployed_files }}
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+      
+      - name: Get Access Token for Fabric API
+        id: get-token
+        run: |
+          echo "Getting access token for Fabric API..."
+          
+          # Get OAuth token using client credentials flow
+          TOKEN_RESPONSE=$(curl -s -X POST \
+            "https://login.microsoftonline.com/${{ secrets.AZURE_TENANT_ID }}/oauth2/v2.0/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+            -d "client_secret=${{ secrets.AZURE_CLIENT_SECRET }}" \
+            -d "scope=https://api.fabric.microsoft.com/.default" \
+            -d "grant_type=client_credentials")
+          
+          # Extract access token
+          ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token // empty')
+          
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+            echo "Failed to get access token"
+            echo "Response: $TOKEN_RESPONSE"
+            exit 1
+          fi
+          
+          echo "Successfully obtained access token"
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "FABRIC_TOKEN=$ACCESS_TOKEN" >> $GITHUB_ENV
+      
+      - name: Validate Workspace Connection
+        id: validate
+        run: |
+          echo "Validating workspace connection..."
+          WORKSPACE_ID="${{ inputs.workspace_id }}"
+          
+          # Get workspace details
+          WORKSPACE_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X GET \
+            "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID" \
+            -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}")
+          
+          HTTP_STATUS=$(echo "$WORKSPACE_RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
+          BODY=$(echo "$WORKSPACE_RESPONSE" | sed '/HTTP_STATUS/d')
+          
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "Failed to access workspace"
+            echo "Status: $HTTP_STATUS"
+            echo "Response: $BODY"
+            exit 1
+          fi
+          
+          WORKSPACE_NAME=$(echo "$BODY" | jq -r '.displayName')
+          echo "Workspace validated: $WORKSPACE_NAME"
+          echo "workspace_name=$WORKSPACE_NAME" >> $GITHUB_OUTPUT
+      
+      - name: Find Power BI Files
+        id: find-files
+        run: |
+          echo "Searching for .pbir files in ${{ inputs.reports_path }}..."
+          
+          if [ ! -d "${{ inputs.reports_path }}" ]; then
+            echo "Error: Reports path '${{ inputs.reports_path }}' does not exist"
+            exit 1
+          fi
+          
+          # Find all .pbir files
+          FILES=$(find "${{ inputs.reports_path }}" -type f -name "*.pbir" | sort)
+          FILE_COUNT=$(echo "$FILES" | grep -c . || echo "0")
+          
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "No .pbir files found in ${{ inputs.reports_path }}"
+            exit 1
+          fi
+          
+          echo "Found $FILE_COUNT .pbir file(s):"
+          echo "$FILES"
+          
+          # Save file list for next step
+          echo "$FILES" > /tmp/files_to_deploy.txt
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+      
+      - name: Deploy Files to Workspace
+        id: deployment
+        run: |
+          echo "Starting file deployment to ${{ inputs.environment }} workspace..."
+          WORKSPACE_ID="${{ inputs.workspace_id }}"
+          DEPLOYED_FILES=""
+          SUCCESS_COUNT=0
+          FAILED_COUNT=0
+          
+          # Read files list
+          while IFS= read -r FILE_PATH; do
+            [ -z "$FILE_PATH" ] && continue
+            
+            FILE_NAME=$(basename "$FILE_PATH")
+            REPORT_NAME="${FILE_NAME%.pbir}"
+            
+            echo ""
+            echo "================================================"
+            echo "Deploying: $FILE_NAME"
+            echo "Report Name: $REPORT_NAME"
+            echo "================================================"
+            
+            # Read file content and encode to base64
+            FILE_CONTENT=$(cat "$FILE_PATH" | base64 -w 0)
+            
+            # Create or update report in workspace
+            UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+              "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID/reports" \
+              -H "Authorization: Bearer ${{ env.FABRIC_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"displayName\": \"$REPORT_NAME\",
+                \"definition\": {
+                  \"parts\": [
+                    {
+                      \"path\": \"report.json\",
+                      \"payload\": \"$FILE_CONTENT\",
+                      \"payloadType\": \"InlineBase64\"
+                    }
+                  ]
+                }
+              }")
+            
+            HTTP_STATUS=$(echo "$UPLOAD_RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
+            BODY=$(echo "$UPLOAD_RESPONSE" | sed '/HTTP_STATUS/d')
+            
+            if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 201 ] || [ "$HTTP_STATUS" -eq 202 ]; then
+              echo "✓ Successfully deployed: $FILE_NAME"
+              REPORT_ID=$(echo "$BODY" | jq -r '.id // "unknown"')
+              echo "  Report ID: $REPORT_ID"
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+              DEPLOYED_FILES="$DEPLOYED_FILES$FILE_NAME, "
+            else
+              echo "✗ Failed to deploy: $FILE_NAME"
+              echo "  Status: $HTTP_STATUS"
+              echo "  Response: $BODY"
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+            
+          done < /tmp/files_to_deploy.txt
+          
+          # Remove trailing comma and space
+          DEPLOYED_FILES=${DEPLOYED_FILES%, }
+          
+          echo ""
+          echo "================================================"
+          echo "Deployment Summary"
+          echo "================================================"
+          echo "Total files: ${{ steps.find-files.outputs.file_count }}"
+          echo "Successfully deployed: $SUCCESS_COUNT"
+          echo "Failed: $FAILED_COUNT"
+          echo "================================================"
+          
+          # Set outputs
+          echo "deployed_files=$DEPLOYED_FILES" >> $GITHUB_OUTPUT
+          
+          if [ $FAILED_COUNT -eq 0 ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "All files deployed successfully!"
+          elif [ $SUCCESS_COUNT -gt 0 ]; then
+            echo "status=partial" >> $GITHUB_OUTPUT
+            echo "Some files failed to deploy"
+            exit 1
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "All deployments failed"
+            exit 1
+          fi
+      
+      - name: Post Deployment Summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | \`${{ inputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Workspace** | ${{ steps.validate.outputs.workspace_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Workspace ID** | \`${{ inputs.workspace_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ inputs.branch }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Files Found** | ${{ steps.find-files.outputs.file_count || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ steps.deployment.outputs.status || 'failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${{ steps.deployment.outputs.deployed_files }}" ]; then
+            echo "### Deployed Files" >> $GITHUB_STEP_SUMMARY
+            echo "${{ steps.deployment.outputs.deployed_files }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ steps.deployment.outputs.status }}" = "success" ]; then
+            echo "**All files deployed successfully**" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.deployment.outputs.status }}" = "partial" ]; then
+            echo "**Some files failed to deploy**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Deployment failed**" >> $GITHUB_STEP_SUMMARY
+          fi

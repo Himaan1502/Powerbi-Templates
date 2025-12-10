@@ -1,0 +1,291 @@
+# .github/workflows/deploy-powerbi.yml
+name: Deploy Power BI Files to Workspace
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (dev/uat/prod)"
+        required: true
+        type: string
+      branch:
+        description: "Git branch to deploy from"
+        required: true
+        type: string
+      workspace_id:
+        description: "Target workspace ID"
+        required: true
+        type: string
+      reports_path:
+        description: "Path to search for .Report and .SemanticModel folders"
+        required: false
+        type: string
+        default: "."
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_CLIENT_SECRET:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+    outputs:
+      deployment_status:
+        value: ${{ jobs.deploy.outputs.status }}
+      deployed_reports:
+        value: ${{ jobs.deploy.outputs.deployed_reports }}
+      deployed_datasets:
+        value: ${{ jobs.deploy.outputs.deployed_datasets }}
+
+env:
+  FABRIC_API_BASE_URL: "https://api.fabric.microsoft.com/v1"
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }} Workspace
+    runs-on: ubuntu-latest
+
+    outputs:
+      status: ${{ steps.deployment.outputs.status }}
+      deployed_reports: ${{ steps.deployment.outputs.deployed_reports }}
+      deployed_datasets: ${{ steps.deployment.outputs.deployed_datasets }}
+
+    steps:
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Get Access Token for Fabric API
+        id: get-token
+        run: |
+          TOKEN_RESPONSE=$(curl -s -X POST \
+            "https://login.microsoftonline.com/${{ secrets.AZURE_TENANT_ID }}/oauth2/v2.0/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+            -d "client_secret=${{ secrets.AZURE_CLIENT_SECRET }}" \
+            -d "scope=https://api.fabric.microsoft.com/.default" \
+            -d "grant_type=client_credentials")
+
+          ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token // empty')
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "Failed to get access token"
+            echo "Response: $TOKEN_RESPONSE"
+            exit 1
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "FABRIC_TOKEN=$ACCESS_TOKEN" >> $GITHUB_ENV
+
+      - name: Validate Workspace Connection
+        id: validate
+        run: |
+          export FABRIC_TOKEN="${{ env.FABRIC_TOKEN }}"
+          WORKSPACE_ID="${{ inputs.workspace_id }}"
+
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X GET \
+            "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE_ID" \
+            -H "Authorization: Bearer $FABRIC_TOKEN")
+
+          STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
+
+          if [ "$STATUS" -ne 200 ]; then
+            echo "Failed to access workspace"
+            echo "Status: $STATUS"
+            echo "Response: $BODY"
+            exit 1
+          fi
+
+          NAME=$(echo "$BODY" | jq -r '.displayName')
+          echo "workspace_name=$NAME" >> $GITHUB_OUTPUT
+
+      - name: Find Power BI Items
+        id: find-files
+        run: |
+          SEARCH_PATH="${{ inputs.reports_path }}"
+
+          if [ ! -d "$SEARCH_PATH" ]; then
+            echo "Search path does not exist"
+            exit 1
+          fi
+
+          REPORT_FOLDERS=$(find "$SEARCH_PATH" -type d -name "*.Report" | sort)
+          DATASET_FOLDERS=$(find "$SEARCH_PATH" -type d -name "*.SemanticModel" | sort)
+
+          > /tmp/reports_to_deploy.txt
+          > /tmp/datasets_to_deploy.txt
+
+          for F in $REPORT_FOLDERS; do
+            if [ -f "$F/definition.pbir" ] || [ -f "$F/definition/definition.pbir" ]; then
+              echo "$F" >> /tmp/reports_to_deploy.txt
+            fi
+          done
+
+          for F in $DATASET_FOLDERS; do
+            if [ -f "$F/definition.pbism" ] || [ -f "$F/definition/definition.pbism" ]; then
+              echo "$F" >> /tmp/datasets_to_deploy.txt
+            fi
+          done
+
+          REPORT_COUNT=$(wc -l < /tmp/reports_to_deploy.txt)
+          DATASET_COUNT=$(wc -l < /tmp/datasets_to_deploy.txt)
+
+          echo "report_count=$REPORT_COUNT" >> $GITHUB_OUTPUT
+          echo "dataset_count=$DATASET_COUNT" >> $GITHUB_OUTPUT
+          echo "total_count=$((REPORT_COUNT + DATASET_COUNT))" >> $GITHUB_OUTPUT
+
+      - name: Deploy Semantic Models to Workspace
+        id: deploy-datasets
+        run: |
+          export FABRIC_TOKEN="${{ env.FABRIC_TOKEN }}"
+          WORKSPACE="${{ inputs.workspace_id }}"
+
+          SUCCESS=0
+          FAILED=0
+          DEPLOYED=""
+
+          if [ ! -s /tmp/datasets_to_deploy.txt ]; then
+            echo "deployed_datasets=" >> $GITHUB_OUTPUT
+            echo "dataset_success=0" >> $GITHUB_OUTPUT
+            echo "dataset_failed=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          while IFS= read -r FOLDER; do
+            NAME=$(basename "$FOLDER" .SemanticModel)
+
+            DEF="$FOLDER/definition"
+            if [ ! -d "$DEF" ]; then DEF="$FOLDER"; fi
+
+            PARTS="["
+            FIRST=true
+            for FILE in $(find "$DEF" -type f | sort); do
+              REL="definition/${FILE#$FOLDER/}"
+              CONTENT=$(base64 -w 0 < "$FILE")
+
+              if [ "$FIRST" = false ]; then PARTS="$PARTS,"; fi
+              FIRST=false
+
+              PARTS="$PARTS{\"path\":\"$REL\",\"payload\":\"$CONTENT\",\"payloadType\":\"InlineBase64\"}"
+            done
+            PARTS="$PARTS]"
+
+            RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+              "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE/items" \
+              -H "Authorization: Bearer $FABRIC_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"displayName\":\"$NAME\",\"type\":\"SemanticModel\",\"definition\":{\"parts\":$PARTS}}")
+
+            STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
+            BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
+            ID=$(echo "$BODY" | jq -r '.id // empty')
+
+            if [[ "$STATUS" =~ ^20 ]] && [ -n "$ID" ]; then
+              SUCCESS=$((SUCCESS + 1))
+              DEPLOYED="$DEPLOYED$NAME, "
+            else
+              FAILED=$((FAILED + 1))
+            fi
+          done < /tmp/datasets_to_deploy.txt
+
+          DEPLOYED="${DEPLOYED%, }"
+
+          echo "deployed_datasets=$DEPLOYED" >> $GITHUB_OUTPUT
+          echo "dataset_success=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "dataset_failed=$FAILED" >> $GITHUB_OUTPUT
+
+      - name: Deploy Reports to Workspace
+        id: deploy-reports
+        run: |
+          export FABRIC_TOKEN="${{ env.FABRIC_TOKEN }}"
+          WORKSPACE="${{ inputs.workspace_id }}"
+
+          SUCCESS=0
+          FAILED=0
+          DEPLOYED=""
+
+          if [ ! -s /tmp/reports_to_deploy.txt ]; then
+            echo "deployed_reports=" >> $GITHUB_OUTPUT
+            echo "report_success=0" >> $GITHUB_OUTPUT
+            echo "report_failed=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          while IFS= read -r FOLDER; do
+            NAME=$(basename "$FOLDER" .Report)
+
+            DEF="$FOLDER/definition"
+            if [ ! -d "$DEF" ]; then DEF="$FOLDER"; fi
+
+            PARTS="["
+            FIRST=true
+            for FILE in $(find "$DEF" -type f | sort); do
+              REL="definition/${FILE#$FOLDER/}"
+              CONTENT=$(base64 -w 0 < "$FILE")
+
+              if [ "$FIRST" = false ]; then PARTS="$PARTS,"; fi
+              FIRST=false
+
+              PARTS="$PARTS{\"path\":\"$REL\",\"payload\":\"$CONTENT\",\"payloadType\":\"InlineBase64\"}"
+            done
+            PARTS="$PARTS]"
+
+            RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+              "${{ env.FABRIC_API_BASE_URL }}/workspaces/$WORKSPACE/items" \
+              -H "Authorization: Bearer $FABRIC_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"displayName\":\"$NAME\",\"type\":\"Report\",\"definition\":{\"parts\":$PARTS}}")
+
+            STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d: -f2)
+            BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
+            ID=$(echo "$BODY" | jq -r '.id // empty')
+
+            if [[ "$STATUS" =~ ^20 ]] && [ -n "$ID" ]; then
+              SUCCESS=$((SUCCESS + 1))
+              DEPLOYED="$DEPLOYED$NAME, "
+            else
+              FAILED=$((FAILED + 1))
+            fi
+          done < /tmp/reports_to_deploy.txt
+
+          DEPLOYED="${DEPLOYED%, }"
+
+          echo "deployed_reports=$DEPLOYED" >> $GITHUB_OUTPUT
+          echo "report_success=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "report_failed=$FAILED" >> $GITHUB_OUTPUT
+
+      - name: Final Deployment Status
+        id: deployment
+        run: |
+          DS=${{ steps.deploy-datasets.outputs.dataset_success }}
+          DF=${{ steps.deploy-datasets.outputs.dataset_failed }}
+          RS=${{ steps.deploy-reports.outputs.report_success }}
+          RF=${{ steps.deploy-reports.outputs.report_failed }}
+          TOTAL=$((DS + RS))
+          FAIL=$((DF + RF))
+
+          if [ "$FAIL" -eq 0 ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          elif [ "$TOTAL" -gt 0 ]; then
+            echo "status=partial" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Post Deployment Summary
+        if: always()
+        run: |
+          echo "## Deployment Summary - ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "Status: ${{ steps.deployment.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Semantic Models" >> $GITHUB_STEP_SUMMARY
+          echo "- Deployed: ${{ steps.deploy-datasets.outputs.dataset_success }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Failed: ${{ steps.deploy-datasets.outputs.dataset_failed }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Reports" >> $GITHUB_STEP_SUMMARY
+          echo "- Deployed: ${{ steps.deploy-reports.outputs.report_success }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Failed: ${{ steps.deploy-reports.outputs.report_failed }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,435 @@
+# .github/workflows/deploy-powerbi.yml
+# Reusable workflow for Power BI deployment using FabricPS-PBIP module
+# Converted from Microsoft's official Azure DevOps pipeline
+
+name: Deploy Power BI to Workspace
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment (dev/uat/prod)'
+        required: true
+        type: string
+      branch:
+        description: 'Git branch to deploy from'
+        required: true
+        type: string
+      workspace_id:
+        description: 'Target workspace ID'
+        required: true
+        type: string
+      reports_path:
+        description: 'Path to search for .Report and .SemanticModel folders'
+        required: false
+        type: string
+        default: '.'
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_CLIENT_SECRET:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+    outputs:
+      deployment_status:
+        description: 'Status of the deployment'
+        value: ${{ jobs.deploy.outputs.status }}
+      deployed_reports:
+        description: 'List of deployed reports'
+        value: ${{ jobs.deploy.outputs.deployed_reports }}
+      deployed_datasets:
+        description: 'List of deployed semantic models'
+        value: ${{ jobs.deploy.outputs.deployed_datasets }}
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }} Workspace
+    runs-on: windows-latest
+    outputs:
+      status: ${{ steps.deployment-status.outputs.status }}
+      deployed_reports: ${{ steps.deployment-status.outputs.deployed_reports }}
+      deployed_datasets: ${{ steps.deployment-status.outputs.deployed_datasets }}
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+      
+      - name: Download FabricPS-PBIP Module
+        shell: pwsh
+        run: |
+          Write-Host "=========================================="
+          Write-Host "DOWNLOADING FABRICPS-PBIP MODULE"
+          Write-Host "=========================================="
+          
+          $workingFolder = "${{ github.workspace }}\.fabricps"
+          $modulesFolder = "$workingFolder\modules"
+          
+          New-Item -ItemType Directory -Path $modulesFolder -Force | Out-Null
+          
+          Write-Host "📦 Downloading FabricPS-PBIP module..."
+          
+          $urls = @(
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+          )
+          
+          foreach ($url in $urls) {
+              $fileName = Split-Path $url -Leaf
+              $outFile = Join-Path $modulesFolder $fileName
+              Write-Host "  ⬇️  Downloading: $fileName"
+              Invoke-WebRequest -Uri $url -OutFile $outFile
+          }
+          
+          Write-Host "✅ FabricPS-PBIP module downloaded successfully"
+          
+          # Store module path for next steps
+          echo "FABRICPS_MODULE_PATH=$modulesFolder" >> $env:GITHUB_ENV
+      
+      - name: Install Required PowerShell Modules
+        shell: pwsh
+        run: |
+          Write-Host "=========================================="
+          Write-Host "INSTALLING POWERSHELL MODULES"
+          Write-Host "=========================================="
+          
+          Write-Host "📦 Installing Az.Accounts module..."
+          
+          if (-not (Get-Module Az.Accounts -ListAvailable)) {
+              Install-Module Az.Accounts -Scope CurrentUser -Force -AllowClobber
+              Write-Host "✅ Az.Accounts installed"
+          } else {
+              Write-Host "✅ Az.Accounts already installed"
+          }
+      
+      - name: Find Power BI Items
+        id: find-items
+        shell: pwsh
+        run: |
+          Write-Host "=========================================="
+          Write-Host "SEARCHING FOR POWER BI ITEMS"
+          Write-Host "=========================================="
+          Write-Host "Search path: ${{ inputs.reports_path }}"
+          Write-Host ""
+          
+          $searchPath = "${{ inputs.reports_path }}"
+          
+          # Find .Report folders
+          Write-Host "=== Searching for Reports ==="
+          $reportFolders = Get-ChildItem -Path $searchPath -Directory -Filter "*.Report" -Recurse | Sort-Object Name
+          $reportCount = $reportFolders.Count
+          Write-Host "Found $reportCount .Report folder(s)"
+          
+          $validReports = @()
+          foreach ($folder in $reportFolders) {
+              $pbir = Get-ChildItem -Path $folder.FullName -Filter "definition.pbir" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($pbir) {
+                  Write-Host "  ✓ $($folder.FullName)"
+                  Write-Host "    Definition file: $($pbir.FullName)"
+                  $validReports += $folder.FullName
+              } else {
+                  Write-Host "  ✗ $($folder.FullName) (missing definition.pbir)"
+              }
+          }
+          
+          # Find .SemanticModel folders
+          Write-Host ""
+          Write-Host "=== Searching for Semantic Models ==="
+          $datasetFolders = Get-ChildItem -Path $searchPath -Directory -Filter "*.SemanticModel" -Recurse | Sort-Object Name
+          $datasetCount = $datasetFolders.Count
+          Write-Host "Found $datasetCount .SemanticModel folder(s)"
+          
+          $validDatasets = @()
+          foreach ($folder in $datasetFolders) {
+              $pbism = Get-ChildItem -Path $folder.FullName -Filter "definition.pbism" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($pbism) {
+                  Write-Host "  ✓ $($folder.FullName)"
+                  Write-Host "    Definition file: $($pbism.FullName)"
+                  $validDatasets += $folder.FullName
+              } else {
+                  Write-Host "  ✗ $($folder.FullName) (missing definition.pbism)"
+              }
+          }
+          
+          Write-Host ""
+          Write-Host "=== Summary ==="
+          Write-Host "Valid reports to deploy: $($validReports.Count)"
+          Write-Host "Valid semantic models to deploy: $($validDatasets.Count)"
+          
+          $totalItems = $validReports.Count + $validDatasets.Count
+          
+          if ($totalItems -eq 0) {
+              Write-Host "❌ No valid Power BI items found"
+              exit 1
+          }
+          
+          # Save to environment for next steps
+          $validReports | Out-File -FilePath "${{ github.workspace }}\.fabricps\reports.txt" -Encoding UTF8
+          $validDatasets | Out-File -FilePath "${{ github.workspace }}\.fabricps\datasets.txt" -Encoding UTF8
+          
+          echo "report_count=$($validReports.Count)" >> $env:GITHUB_OUTPUT
+          echo "dataset_count=$($validDatasets.Count)" >> $env:GITHUB_OUTPUT
+          echo "total_count=$totalItems" >> $env:GITHUB_OUTPUT
+      
+      - name: Deploy Power BI Items
+        id: deploy
+        shell: pwsh
+        run: |
+          Write-Host "=========================================="
+          Write-Host "DEPLOYING POWER BI ITEMS"
+          Write-Host "=========================================="
+          
+          # Import FabricPS-PBIP module
+          $modulePath = Join-Path "${{ env.FABRICPS_MODULE_PATH }}" "FabricPS-PBIP.psm1"
+          Import-Module $modulePath -Force
+          Write-Host "✅ FabricPS-PBIP module imported"
+          
+          # Authenticate with Service Principal
+          Write-Host ""
+          Write-Host "🔐 Authenticating with Service Principal..."
+          
+          $appId = "${{ secrets.AZURE_CLIENT_ID }}"
+          $appSecret = "${{ secrets.AZURE_CLIENT_SECRET }}"
+          $tenantId = "${{ secrets.AZURE_TENANT_ID }}"
+          $workspaceId = "${{ inputs.workspace_id }}"
+          
+          try {
+              Set-FabricAuthToken -servicePrincipalId $appId -servicePrincipalSecret $appSecret -tenantId $tenantId -reset
+              Write-Host "✅ Authentication successful"
+          } catch {
+              Write-Host "❌ Authentication failed: $_"
+              exit 1
+          }
+          
+          # Initialize counters
+          $deployedDatasets = @()
+          $deployedReports = @()
+          $datasetSuccessCount = 0
+          $datasetFailCount = 0
+          $reportSuccessCount = 0
+          $reportFailCount = 0
+          
+          # Deploy Semantic Models
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "DEPLOYING SEMANTIC MODELS"
+          Write-Host "=========================================="
+          
+          $datasetsFile = "${{ github.workspace }}\.fabricps\datasets.txt"
+          if (Test-Path $datasetsFile) {
+              $datasetPaths = Get-Content $datasetsFile | Where-Object { $_.Trim() -ne "" }
+              
+              foreach ($datasetPath in $datasetPaths) {
+                  $datasetName = [System.IO.Path]::GetFileNameWithoutExtension($datasetPath)
+                  
+                  Write-Host ""
+                  Write-Host "================================================"
+                  Write-Host "📊 Deploying Semantic Model: $datasetName"
+                  Write-Host "   Path: $datasetPath"
+                  Write-Host "================================================"
+                  
+                  try {
+                      Write-Host "   🚀 Starting deployment..."
+                      $semanticModelImport = Import-FabricItem -workspaceId $workspaceId -path $datasetPath
+                      
+                      if ($semanticModelImport -and $semanticModelImport.Id) {
+                          Write-Host "   ✅ Successfully deployed: $datasetName"
+                          Write-Host "   📋 Semantic Model ID: $($semanticModelImport.Id)"
+                          $deployedDatasets += $datasetName
+                          $datasetSuccessCount++
+                          
+                          # Store dataset ID for report binding
+                          $env:LAST_DATASET_ID = $semanticModelImport.Id
+                      } else {
+                          Write-Host "   ❌ Failed to deploy: $datasetName (No ID returned)"
+                          $datasetFailCount++
+                      }
+                  } catch {
+                      Write-Host "   ❌ Failed to deploy: $datasetName"
+                      Write-Host "   📝 Error: $_"
+                      $datasetFailCount++
+                  }
+              }
+          } else {
+              Write-Host "ℹ️  No semantic models to deploy"
+          }
+          
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "SEMANTIC MODELS DEPLOYMENT SUMMARY"
+          Write-Host "=========================================="
+          Write-Host "Total found: ${{ steps.find-items.outputs.dataset_count }}"
+          Write-Host "✅ Success: $datasetSuccessCount"
+          Write-Host "❌ Failed: $datasetFailCount"
+          Write-Host "=========================================="
+          
+          # Deploy Reports
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "DEPLOYING REPORTS"
+          Write-Host "=========================================="
+          
+          $reportsFile = "${{ github.workspace }}\.fabricps\reports.txt"
+          if (Test-Path $reportsFile) {
+              $reportPaths = Get-Content $reportsFile | Where-Object { $_.Trim() -ne "" }
+              
+              foreach ($reportPath in $reportPaths) {
+                  $reportName = [System.IO.Path]::GetFileNameWithoutExtension($reportPath)
+                  
+                  Write-Host ""
+                  Write-Host "================================================"
+                  Write-Host "📊 Deploying Report: $reportName"
+                  Write-Host "   Path: $reportPath"
+                  Write-Host "================================================"
+                  
+                  try {
+                      Write-Host "   🚀 Starting deployment..."
+                      
+                      # If we have a dataset ID from previous deployment, bind the report to it
+                      $itemProperties = $null
+                      if ($env:LAST_DATASET_ID) {
+                          Write-Host "   🔗 Binding report to semantic model ID: $($env:LAST_DATASET_ID)"
+                          $itemProperties = @{ "semanticModelId" = $env:LAST_DATASET_ID }
+                      }
+                      
+                      if ($itemProperties) {
+                          $reportImport = Import-FabricItem -workspaceId $workspaceId -path $reportPath -itemProperties $itemProperties
+                      } else {
+                          $reportImport = Import-FabricItem -workspaceId $workspaceId -path $reportPath
+                      }
+                      
+                      if ($reportImport -and $reportImport.Id) {
+                          Write-Host "   ✅ Successfully deployed: $reportName"
+                          Write-Host "   📋 Report ID: $($reportImport.Id)"
+                          $deployedReports += $reportName
+                          $reportSuccessCount++
+                      } else {
+                          Write-Host "   ❌ Failed to deploy: $reportName (No ID returned)"
+                          $reportFailCount++
+                      }
+                  } catch {
+                      Write-Host "   ❌ Failed to deploy: $reportName"
+                      Write-Host "   📝 Error: $_"
+                      $reportFailCount++
+                  }
+              }
+          } else {
+              Write-Host "ℹ️  No reports to deploy"
+          }
+          
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "REPORTS DEPLOYMENT SUMMARY"
+          Write-Host "=========================================="
+          Write-Host "Total found: ${{ steps.find-items.outputs.report_count }}"
+          Write-Host "✅ Success: $reportSuccessCount"
+          Write-Host "❌ Failed: $reportFailCount"
+          Write-Host "=========================================="
+          
+          # Output results
+          $deployedDatasetsStr = $deployedDatasets -join ", "
+          $deployedReportsStr = $deployedReports -join ", "
+          
+          echo "deployed_datasets=$deployedDatasetsStr" >> $env:GITHUB_OUTPUT
+          echo "deployed_reports=$deployedReportsStr" >> $env:GITHUB_OUTPUT
+          echo "dataset_success=$datasetSuccessCount" >> $env:GITHUB_OUTPUT
+          echo "dataset_failed=$datasetFailCount" >> $env:GITHUB_OUTPUT
+          echo "report_success=$reportSuccessCount" >> $env:GITHUB_OUTPUT
+          echo "report_failed=$reportFailCount" >> $env:GITHUB_OUTPUT
+      
+      - name: Final Deployment Status
+        id: deployment-status
+        shell: pwsh
+        run: |
+          $datasetSuccess = [int]"${{ steps.deploy.outputs.dataset_success }}"
+          $datasetFailed = [int]"${{ steps.deploy.outputs.dataset_failed }}"
+          $reportSuccess = [int]"${{ steps.deploy.outputs.report_success }}"
+          $reportFailed = [int]"${{ steps.deploy.outputs.report_failed }}"
+          
+          $totalSuccess = $datasetSuccess + $reportSuccess
+          $totalFailed = $datasetFailed + $reportFailed
+          $totalItems = [int]"${{ steps.find-items.outputs.total_count }}"
+          
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "OVERALL DEPLOYMENT SUMMARY"
+          Write-Host "=========================================="
+          Write-Host "Environment: ${{ inputs.environment }}"
+          Write-Host "Workspace ID: ${{ inputs.workspace_id }}"
+          Write-Host "Branch: ${{ inputs.branch }}"
+          Write-Host ""
+          Write-Host "📊 Semantic Models: $datasetSuccess deployed, $datasetFailed failed"
+          Write-Host "📈 Reports: $reportSuccess deployed, $reportFailed failed"
+          Write-Host "----------------------------------------"
+          Write-Host "🎯 Total: $totalSuccess/$totalItems succeeded"
+          Write-Host "=========================================="
+          
+          echo "deployed_reports=${{ steps.deploy.outputs.deployed_reports }}" >> $env:GITHUB_OUTPUT
+          echo "deployed_datasets=${{ steps.deploy.outputs.deployed_datasets }}" >> $env:GITHUB_OUTPUT
+          
+          if ($totalFailed -eq 0) {
+              echo "status=success" >> $env:GITHUB_OUTPUT
+              Write-Host ""
+              Write-Host "✅✅✅ ALL ITEMS DEPLOYED SUCCESSFULLY! ✅✅✅"
+          } elseif ($totalSuccess -gt 0) {
+              echo "status=partial" >> $env:GITHUB_OUTPUT
+              Write-Host ""
+              Write-Host "⚠️⚠️⚠️ PARTIAL DEPLOYMENT - SOME ITEMS FAILED ⚠️⚠️⚠️"
+              exit 1
+          } else {
+              echo "status=failed" >> $env:GITHUB_OUTPUT
+              Write-Host ""
+              Write-Host "❌❌❌ ALL DEPLOYMENTS FAILED ❌❌❌"
+              exit 1
+          }
+      
+      - name: Post Deployment Summary
+        if: always()
+        shell: pwsh
+        run: |
+          $summary = @"
+          ## 🚀 Deployment Summary - ${{ inputs.environment }}
+          
+          | Property | Value |
+          |----------|-------|
+          | **Environment** | ``${{ inputs.environment }}`` |
+          | **Workspace ID** | ``${{ inputs.workspace_id }}`` |
+          | **Branch** | ``${{ inputs.branch }}`` |
+          | **Status** | ${{ steps.deployment-status.outputs.status }} |
+          
+          ### 📊 Semantic Models
+          - **Found:** ${{ steps.find-items.outputs.dataset_count }}
+          - **Deployed:** ${{ steps.deploy.outputs.dataset_success }}
+          - **Failed:** ${{ steps.deploy.outputs.dataset_failed }}
+          "@
+          
+          if ("${{ steps.deploy.outputs.deployed_datasets }}" -ne "") {
+              $summary += "`n- **Items:** ${{ steps.deploy.outputs.deployed_datasets }}"
+          }
+          
+          $summary += @"
+          
+          ### 📈 Reports
+          - **Found:** ${{ steps.find-items.outputs.report_count }}
+          - **Deployed:** ${{ steps.deploy.outputs.report_success }}
+          - **Failed:** ${{ steps.deploy.outputs.report_failed }}
+          "@
+          
+          if ("${{ steps.deploy.outputs.deployed_reports }}" -ne "") {
+              $summary += "`n- **Items:** ${{ steps.deploy.outputs.deployed_reports }}"
+          }
+          
+          $summary += "`n"
+          
+          $status = "${{ steps.deployment-status.outputs.status }}"
+          if ($status -eq "success") {
+              $summary += "`n✅ **All items deployed successfully**"
+          } elseif ($status -eq "partial") {
+              $summary += "`n⚠️ **Some items failed to deploy**"
+          } else {
+              $summary += "`n❌ **Deployment failed**"
+          }
+          
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8

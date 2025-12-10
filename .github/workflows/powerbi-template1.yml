@@ -56,10 +56,10 @@ jobs:
         with:
           ref: ${{ inputs.branch }}
 
-      - name: Debug Tenant
+      - name: Debug Tenant RAW
         run: |
-          echo "Tenant: ${{ secrets.AZURE_TENANT_ID }}"
-    
+          echo "TENANT_RAW=${{ secrets.AZURE_TENANT_ID }}X"
+
       - name: Get Access Token for Fabric API
         id: get-token
         run: |
